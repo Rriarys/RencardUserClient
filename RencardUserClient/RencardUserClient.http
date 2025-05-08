@@ -1,0 +1,6 @@
+@RencardUserClient_HostAddress = http://localhost:5244
+
+GET {{RencardUserClient_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
