@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using RencardUserClient.DTOs.Auth;
 using RencardUserClient.Interfaces;
 
@@ -34,6 +35,7 @@ namespace RencardUserClient.Controllers
         }
 
         [HttpPost("logout")]
+        [Authorize]
         public async Task<IActionResult> Logout()
         {
             await _auth.LogoutAsync();
@@ -41,6 +43,7 @@ namespace RencardUserClient.Controllers
         }
 
         [HttpPost("refresh-token")]
+        [Authorize]
         public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest dto)
         {
             var result = await _auth.RefreshTokenAsync(dto);
@@ -50,6 +53,7 @@ namespace RencardUserClient.Controllers
         }
 
         [HttpPost("change-password")]
+        [Authorize]
         public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest dto)
         {
             var result = await _auth.ChangePasswordAsync(dto);

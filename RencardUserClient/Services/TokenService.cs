@@ -20,10 +20,17 @@ namespace RencardUserClient.Services
 
         public string GenerateAccessToken(string userId, IDictionary<string, string>? claims = null)
         {
-            var claimsList = new List<Claim> { new("sub", userId) };
+            var claimsList = new List<Claim>
+            {
+                new("sub", userId),
+                new(ClaimTypes.NameIdentifier, userId) // ← обязательно для UserManager
+            };
+
             if (claims != null)
+            {
                 foreach (var kv in claims)
                     claimsList.Add(new Claim(kv.Key, kv.Value));
+            }
 
             var creds = new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_opts.Secret)),
