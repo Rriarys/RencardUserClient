@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using RencardUserClient.Database;
-using NetTopologySuite;
+using RencardUserClient.Configuration;
+using RencardUserClient.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,10 +19,19 @@ builder.Services.AddDbContext<RencardUserDbContext>(options =>
     );
 });
 
+// Auth & Swagger
+builder.Services.AddAuthServices(builder.Configuration);
+builder.Services.AddSwaggerAuth();
+
+builder.Services.AddControllers();
+
 var app = builder.Build();
 
-app.UseHttpsRedirection();
+app.UseSwagger();
+app.UseSwaggerUI();
 
+app.UseHttpsRedirection();
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
