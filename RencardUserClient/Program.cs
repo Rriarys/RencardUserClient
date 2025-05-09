@@ -2,10 +2,17 @@ using Microsoft.EntityFrameworkCore;
 using RencardUserClient.Database;
 using RencardUserClient.Configurations;
 using RencardUserClient.Extensions;
+using Microsoft.AspNetCore.Identity;
+using RencardUserClient.Models.Identity;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+
+// Добавление Identity
+builder.Services.AddIdentity<User, IdentityRole>()
+    .AddEntityFrameworkStores<RencardUserDbContext>()
+    .AddDefaultTokenProviders();
 
 // Регистрация DbContext с PostGIS
 builder.Services.AddDbContext<RencardUserDbContext>(options =>
