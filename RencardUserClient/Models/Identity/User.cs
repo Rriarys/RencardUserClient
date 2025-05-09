@@ -15,11 +15,9 @@ namespace RencardUserClient.Models.Identity
         public virtual AboutUser? About { get; set; }
         public virtual UserPhoto? Photo { get; set; }
 
-        [Required]
         public DateTime? BirthDate { get; set; }
         // На контроллере проставлю эти значения как обязательные
 
-        [Required(ErrorMessage = "Sex is required.")]
         [RegularExpression("male|female")]
         public string? Sex { get; set; }  
     }
