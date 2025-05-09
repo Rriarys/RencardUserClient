@@ -1,6 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using RencardUserClient.Database;
-using RencardUserClient.Configuration;
+using RencardUserClient.Configurations;
 using RencardUserClient.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
