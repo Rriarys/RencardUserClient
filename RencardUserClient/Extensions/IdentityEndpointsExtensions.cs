@@ -1,13 +1,15 @@
 ﻿using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
-using NetTopologySuite.Geometries;
 using RencardUserClient.Database;
 using RencardUserClient.Models.About;
 using RencardUserClient.Models.Identity;
 using RencardUserClient.Models.Location;
-using RencardUserClient.Models.Photos;
 using RencardUserClient.Models.Preferences;
 using System.ComponentModel.DataAnnotations;
+using RencardUserClient.Models.DTOs;
+using RencardUserClient.Models.DTOs.Extensions;
+using Microsoft.AspNetCore.JsonPatch;
+using RencardUserClient.Models.DTOs.Update;
 
 namespace RencardUserClient.Extensions
 {
@@ -16,22 +18,52 @@ namespace RencardUserClient.Extensions
         public static IEndpointRouteBuilder MapIdentityEndpoints(this IEndpointRouteBuilder endpoints)
         {
             endpoints.MapPut("/user-phone-sex-age", async (
-                UserManager<User> userManager,
-                RencardUserDbContext db,
-                HttpContext ctx,
-                PhoneSexAgeRequest request) =>
+            UserManager<User> userManager,
+            RencardUserDbContext db,
+            HttpContext ctx,
+            PhoneSexAgeRequest request) =>
             {
-                var validationResults = new List<ValidationResult>();
-                if (!Validator.TryValidateObject(request, new ValidationContext(request), validationResults, true))
+                // 1. Проверка типа контента
+                if (!ctx.Request.HasJsonContentType())
                 {
-                    return Results.BadRequest(validationResults.Select(e => e.ErrorMessage));
+                    return Results.BadRequest("Content-Type must be application/json");
                 }
 
+                // 2. Валидация модели
+                var validationResults = new List<ValidationResult>();
+                var validationContext = new ValidationContext(request, null, null);
+
+                bool isValid = Validator.TryValidateObject(
+                    request,
+                    validationContext,
+                    validationResults,
+                    validateAllProperties: true);
+
+                Console.WriteLine($"Model validation result: {isValid}");
+                foreach (var error in validationResults)
+                {
+                    Console.WriteLine($"Validation error: {error.ErrorMessage}");
+                }
+
+                if (!isValid)
+                {
+                    return Results.ValidationProblem(
+                        validationResults.ToDictionary(
+                            e => e.MemberNames.FirstOrDefault() ?? string.Empty,
+                            e => new[] { e.ErrorMessage ?? "Invalid value" }
+                        )
+                    );
+                }
+
+                // 3. Дополнительная проверка номера телефона
+                if (await db.Users.AnyAsync(u => u.PhoneNumber == request.PhoneNumber))
+                {
+                    return Results.BadRequest("Phone number is already in use");
+                }
+
+                // 4. Обновление пользователя
                 var user = await userManager.GetUserAsync(ctx.User);
                 if (user == null) return Results.Unauthorized();
-
-                if (await db.Users.AnyAsync(u => u.PhoneNumber == request.PhoneNumber))
-                    return Results.BadRequest("Phone number is already in use");
 
                 user.PhoneNumber = request.PhoneNumber;
                 user.Sex = request.Sex;
@@ -44,32 +76,54 @@ namespace RencardUserClient.Extensions
             }).RequireAuthorization();
 
             endpoints.MapPost("/initialize-profile", async (
-                UserManager<User> userManager,
-                RencardUserDbContext db,
-                HttpContext ctx) =>
+            UserManager<User> userManager,
+            RencardUserDbContext db,
+            HttpContext ctx) =>
             {
                 var user = await userManager.GetUserAsync(ctx.User);
-                if (user == null) return Results.Unauthorized();
+                if (user == null)
+                    return Results.Unauthorized();
 
+                // Initialize About
                 if (!await db.AboutUsers.AnyAsync(a => a.UserId == user.Id))
-                    db.AboutUsers.Add(new AboutUser { UserId = user.Id });
+                {
+                    var aboutDto = new AboutDto();
+                    db.AboutUsers.Add(aboutDto.ToEntity(user.Id));
+                }
 
+                // Initialize Preferences
                 if (!await db.UserPreferences.AnyAsync(p => p.UserId == user.Id))
-                    db.UserPreferences.Add(new UserPreferences { UserId = user.Id });
+                {
+                    var prefsDto = new PreferencesDto();
+                    db.UserPreferences.Add(prefsDto.ToEntity(user.Id));
+                }
 
+                // Initialize Location with null Geography
                 if (!await db.UserLocations.AnyAsync(l => l.UserId == user.Id))
-                    db.UserLocations.Add(new UserLocation
-                    {
-                        UserId = user.Id,
-                        Geography = new Point(0, 0) { SRID = 4326 }
-                    });
+                {
+                    var locDto = new LocationDto(
+                        Longitude: 0,    // placeholder; not used in ToEntity
+                        Latitude: 0,
+                        LastUpdated: default
+                    );
+                    db.UserLocations.Add(locDto.ToEntity(user.Id));
+                }
 
+                // Initialize Photo record (without actual photo)
                 if (!await db.UserPhotos.AnyAsync(p => p.UserId == user.Id))
-                    db.UserPhotos.Add(new UserPhoto { UserId = user.Id });
+                {
+                    var photoDto = new PhotoDto
+                    {
+                        BlobUrl = null,
+                        UploadedAt = DateTime.UtcNow
+                    };
+                    db.UserPhotos.Add(photoDto.ToEntity(user.Id));
+                }
 
                 await db.SaveChangesAsync();
                 return Results.Ok("Profile initialized");
             }).RequireAuthorization();
+
 
             endpoints.MapGet("/me", async (
                 UserManager<User> userManager,
@@ -90,33 +144,52 @@ namespace RencardUserClient.Extensions
                 ));
             }).RequireAuthorization();
 
-            endpoints.MapPut("/me", async (
+            // PATCH /me — частичное обновление профиля
+            endpoints.MapMethods("/me", new[] { "PATCH" }, async (
+                JsonPatchDocument<ProfilePatchDto> patchDoc,
                 UserManager<User> userManager,
                 RencardUserDbContext db,
-                HttpContext ctx,
-                ProfileUpdateRequest request) =>
+                HttpContext ctx) =>
             {
                 var user = await userManager.GetUserAsync(ctx.User);
-                if (user == null) return Results.Unauthorized();
+                if (user == null)
+                    return Results.Unauthorized();
 
-                // Обновление About
-                var about = await db.AboutUsers.FirstOrDefaultAsync(a => a.UserId == user.Id)
-                            ?? new AboutUser { UserId = user.Id };
-                about.UpdateFrom(request.About);
-                db.AboutUsers.Update(about);
+                // 1) Загружаем текущие сущности или инициализируем (для новых пользователей)
+                var aboutE = await db.AboutUsers.FirstOrDefaultAsync(a => a.UserId == user.Id)
+                              ?? new AboutUser { UserId = user.Id };
+                var prefsE = await db.UserPreferences.FirstOrDefaultAsync(p => p.UserId == user.Id)
+                              ?? new UserPreferences { UserId = user.Id };
+                var locationE = await db.UserLocations.FirstOrDefaultAsync(l => l.UserId == user.Id)
+                                ?? new UserLocation { UserId = user.Id };
 
-                // Обновление Preferences
-                var preferences = await db.UserPreferences.FirstOrDefaultAsync(p => p.UserId == user.Id)
-                                    ?? new UserPreferences { UserId = user.Id };
-                preferences.UpdateFrom(request.Preferences);
-                db.UserPreferences.Update(preferences);
+                // 2) Мапим сущности в Update-DTO
+                var dto = new ProfilePatchDto(
+                    About: aboutE.ToDtoUpdate(),
+                    Preferences: prefsE.ToDtoUpdate(),
+                    Location: locationE.ToDtoUpdate()
+                );
 
-                // Обновление Location
-                var location = await db.UserLocations.FirstOrDefaultAsync(l => l.UserId == user.Id)
-                                 ?? new UserLocation { UserId = user.Id };
-                location.UpdateFrom(request.Location);
-                db.UserLocations.Update(location);
+                // 3) Применяем JSON-Patch операции
+                patchDoc.ApplyTo(dto);
 
+                // 4) Валидация результирующего DTO
+                var validationContext = new ValidationContext(dto);
+                var validationResults = new List<ValidationResult>();
+                if (!Validator.TryValidateObject(dto, validationContext, validationResults, true))
+                {
+                    var errors = validationResults
+                        .GroupBy(e => e.MemberNames.FirstOrDefault())
+                        .ToDictionary(g => g.Key ?? string.Empty, g => g.Select(e => e.ErrorMessage!).ToArray());
+                    return Results.ValidationProblem(errors);
+                }
+
+                // 5) Применяем изменения из DTO в сущности
+                aboutE.UpdateFrom(dto.About!);
+                prefsE.UpdateFrom(dto.Preferences!);
+                locationE.UpdateFrom(dto.Location!);
+
+                // 6) Сохраняем в БД
                 await db.SaveChangesAsync();
                 return Results.NoContent();
             }).RequireAuthorization();
@@ -144,113 +217,4 @@ namespace RencardUserClient.Extensions
             return endpoints;
         }
     }
-
-    #region DTO Classes
-    public record PhoneSexAgeRequest(
-        [Required] DateTime BirthDate,
-        [Required][RegularExpression("male|female")] string Sex,
-        [Required][Phone][StringLength(12)] string PhoneNumber
-    );
-
-    public record ProfileResponse(
-        AboutDto? About,
-        LocationDto? Location,
-        PreferencesDto? Preferences
-    );
-
-    public record ProfileUpdateRequest(
-        [Required] AboutDto About,
-        [Required] LocationDto Location,
-        [Required] PreferencesDto Preferences
-    );
-
-    public record AboutDto(
-        string Description = "",
-        bool IsSmoker = false,
-        string Alcohol = "None",
-        string Religion = "Other"
-    );
-
-    public record LocationDto(
-        double Longitude = 0,
-        double Latitude = 0,
-        DateTime LastUpdated = default
-    );
-
-    public record PreferencesDto(
-        string PreferredSex = "both",
-        int MinPreferredAge = 18,
-        int MaxPreferredAge = 100,
-        int SearchRadiusKm = 1
-    );
-    #endregion
-
-    #region Extension Methods
-    public static class EntityExtensions
-    {
-        public static AboutDto ToDto(this AboutUser entity) => new(
-            entity.Description,
-            entity.IsSmoker,
-            entity.Alcohol,
-            entity.Religion
-        );
-
-        public static LocationDto ToDto(this UserLocation entity) => new(
-            entity.Geography?.X ?? 0,
-            entity.Geography?.Y ?? 0,
-            entity.LastUpdated
-        );
-
-        public static PreferencesDto ToDto(this UserPreferences entity) => new(
-            entity.PreferredSex,
-            entity.MinPreferredAge,
-            entity.MaxPreferredAge,
-            entity.SearchRadiusKm
-        );
-
-        public static void UpdateFrom(this AboutUser entity, AboutDto dto)
-        {
-            entity.Description = dto.Description;
-            entity.IsSmoker = dto.IsSmoker;
-            entity.Alcohol = dto.Alcohol;
-            entity.Religion = dto.Religion;
-        }
-
-        public static void UpdateFrom(this UserPreferences entity, PreferencesDto dto)
-        {
-            entity.PreferredSex = dto.PreferredSex;
-            entity.MinPreferredAge = dto.MinPreferredAge;
-            entity.MaxPreferredAge = dto.MaxPreferredAge;
-            entity.SearchRadiusKm = dto.SearchRadiusKm;
-        }
-
-        public static void UpdateFrom(this UserLocation entity, LocationDto dto)
-        {
-            entity.Geography = new Point(dto.Longitude, dto.Latitude) { SRID = 4326 };
-            entity.LastUpdated = DateTime.UtcNow;
-        }
-    }
-    #endregion
-
-    #region Custom Validation
-    public class CustomAgeValidationAttribute : ValidationAttribute
-    {
-        private readonly int _minAge;
-        public CustomAgeValidationAttribute(int minAge) => _minAge = minAge;
-
-        public override bool IsValid(object? value)
-        {
-            if (value is DateTime date)
-            {
-                var age = DateTime.Today.Year - date.Year;
-                if (date > DateTime.Today.AddYears(-age)) age--;
-                return age >= _minAge;
-            }
-            return false;
-        }
-
-        public override string FormatErrorMessage(string name)
-            => $"{name} must indicate age of at least {_minAge} years.";
-    }
-    #endregion
 }
